@@ -1,0 +1,51 @@
+{
+  "manifest_version": 3,
+  "name": "EraseMark",
+  "version": "1.0.0",
+  "description": "Clean overlays on images you own or are authorized to edit. Mark unwanted regions and inpaint them locally in your browser.",
+  "offline_enabled": true,
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "contextMenus",
+    "downloads",
+    "storage",
+    "notifications",
+    "offscreen",
+    "alarms"
+  ],
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "action": {
+    "default_title": "EraseMark",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icon16.png",
+      "32": "icon32.png",
+      "48": "icon48.png",
+      "128": "icon128.png"
+    }
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "options_page": "options.html",
+  "icons": {
+    "16": "icon16.png",
+    "32": "icon32.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["opencv.js", "opencv_js.wasm", "editor.html", "assets/*"],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';"
+  }
+}
