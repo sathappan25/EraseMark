@@ -1,0 +1,11 @@
+node_modules
+dist
+.DS_Store
+*.log
+public/opencv.js
+public/opencv_js.wasm
+.vscode
+.idea
+tools/out
+*.png
+!public/**/*.png
