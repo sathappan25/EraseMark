@@ -3,6 +3,7 @@ import { downloadInServiceWorker } from "./swDownload";
 import { formatQuickRestoreFilename } from "../utils/filename";
 import { RestoreStageError } from "../utils/timeout";
 import { showRestoreLoading, showRestoreSuccess } from "./pageOverlay";
+import { saveImageBlob, setPendingEditorState } from "../utils/storage";
 
 const activeRequests = new Map<string, Promise<void>>();
 const CONTENT_SCRIPT = "content/imageSelector.js";
@@ -13,6 +14,13 @@ function log(...args: unknown[]): void {
 
 function logError(stage: string, error: unknown): void {
   console.error("[EraseMark ERROR]", stage, error);
+}
+
+function needsManualRestore(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /could not be confidently identified|too large|No watermark area selected|not precise enough/i.test(
+    message,
+  );
 }
 
 async function updateOverlay(
@@ -93,10 +101,59 @@ async function restoreOnce(
   log("SUCCESS ✓");
 }
 
-async function runProcessImage(imageUrl: string, tabId?: number): Promise<void> {
+async function openManualRestore(
+  imageUrl: string,
+  tabId: number | undefined,
+  buffer?: ArrayBuffer,
+  mimeType?: string,
+): Promise<void> {
+  let bytes = buffer;
+  let mime = mimeType || "image/png";
+  if (!bytes && tabId != null) {
+    const captured = await captureFromTab(tabId, imageUrl);
+    if (captured) {
+      bytes = captured.buffer;
+      mime = captured.mimeType;
+    }
+  }
+  if (!bytes) {
+    try {
+      const response = await fetch(imageUrl);
+      if (response.ok) {
+        bytes = await response.arrayBuffer();
+        mime = response.headers.get("content-type") || mime;
+      }
+    } catch (error) {
+      logError("MANUAL_FETCH", error);
+    }
+  }
+  if (!bytes) {
+    throw new RestoreStageError(
+      "DETECT_OVERLAY",
+      "Watermark could not be confidently identified.\nOpen Manual Restore and select the area yourself.",
+    );
+  }
+
+  const blob = new Blob([bytes], { type: mime });
+  const record = await saveImageBlob(blob, {
+    name: "erasemark-source",
+    source: "context-menu",
+    type: mime,
+  });
+  await setPendingEditorState({ imageId: record.id });
+  const editorUrl = chrome.runtime.getURL(`editor.html?image=${encodeURIComponent(record.id)}`);
+  await chrome.tabs.create({ url: editorUrl });
+  log("Opened Manual Restore with captured image", record.id);
+}
+
+async function runProcessImage(
+  imageUrl: string,
+  tabId?: number,
+): Promise<"done" | "manual"> {
   void updateOverlay(tabId, "Fetching image...", "FETCH_IMAGE");
   try {
     await restoreOnce(imageUrl, tabId);
+    return "done";
   } catch (error) {
     const stage = error instanceof RestoreStageError ? error.stage : "FETCH_IMAGE";
     logError(stage, error);
@@ -110,9 +167,26 @@ async function runProcessImage(imageUrl: string, tabId?: number): Promise<void> 
       const captured = await captureFromTab(tabId, imageUrl);
       if (captured) {
         log("Retrying restore with tab-captured image");
-        await restoreOnce(imageUrl, tabId, captured.buffer, captured.mimeType);
-        return;
+        try {
+          await restoreOnce(imageUrl, tabId, captured.buffer, captured.mimeType);
+          return "done";
+        } catch (retryError) {
+          if (needsManualRestore(retryError)) {
+            void updateOverlay(tabId, "Opening Manual Restore...", "DETECT_OVERLAY");
+            await openManualRestore(imageUrl, tabId, captured.buffer, captured.mimeType);
+            return "manual";
+          }
+          throw retryError instanceof RestoreStageError
+            ? retryError
+            : new RestoreStageError(stage, message);
+        }
       }
+    }
+
+    if (needsManualRestore(error)) {
+      void updateOverlay(tabId, "Opening Manual Restore...", "DETECT_OVERLAY");
+      await openManualRestore(imageUrl, tabId);
+      return "manual";
     }
 
     throw error instanceof RestoreStageError
@@ -130,18 +204,22 @@ export async function processImage(imageUrl: string, tabId?: number): Promise<vo
     throw new RestoreStageError("START", "This image is already being processed.");
   }
 
-  const work = runProcessImage(imageUrl, tabId).finally(() => {
-    activeRequests.delete(imageUrl);
-  });
+  let openedManual = false;
+  const work = runProcessImage(imageUrl, tabId)
+    .then((result) => {
+      openedManual = result === "manual";
+    })
+    .finally(() => {
+      activeRequests.delete(imageUrl);
+    });
   activeRequests.set(imageUrl, work);
   await work;
 
-  if (tabId != null) {
-    try {
-      await showRestoreSuccess(tabId);
-    } catch (error) {
-      logError("SUCCESS", error);
-    }
+  if (openedManual || tabId == null) return;
+  try {
+    await showRestoreSuccess(tabId);
+  } catch (error) {
+    logError("SUCCESS", error);
   }
 }
 
