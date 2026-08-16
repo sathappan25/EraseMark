@@ -1,4 +1,4 @@
-export const AUTO_RESTORE_CONFIDENCE_THRESHOLD = 0.62;
+export const AUTO_RESTORE_CONFIDENCE_THRESHOLD = 0.58;
 
 export type OverlayDetectionReason = "low-confidence" | "too-large" | "empty";
 
@@ -148,20 +148,23 @@ function connectedComponents(mask: Uint8Array, width: number, height: number): C
   return components;
 }
 
-const CORNER_MARGIN = 0.17;
-const STRIP_MARGIN = 0.1;
+const CORNER_MARGIN = 0.22;
+const STRIP_MARGIN = 0.14;
 
-/** Watermarks sit in a corner box or in a thin top/bottom band. Nothing else is scanned. */
+/** Watermarks sit near any image edge — corners, top/bottom strips, or left/right gutters. */
 function inSearchZone(x: number, y: number, width: number, height: number): boolean {
-  const inCornerX = x <= width * CORNER_MARGIN || x >= width * (1 - CORNER_MARGIN);
-  const inCornerY = y <= height * CORNER_MARGIN || y >= height * (1 - CORNER_MARGIN);
-  if (inCornerX && inCornerY) return true;
-  return y <= height * STRIP_MARGIN || y >= height * (1 - STRIP_MARGIN);
+  return (
+    x <= width * STRIP_MARGIN ||
+    x >= width * (1 - STRIP_MARGIN) ||
+    y <= height * STRIP_MARGIN ||
+    y >= height * (1 - STRIP_MARGIN)
+  );
 }
 
 interface Zone {
   corner: boolean;
   strip: boolean;
+  edge: boolean;
   /** Distance from the nearest image corner, normalised by the shorter image side. */
   cornerDistance: number;
 }
@@ -179,9 +182,12 @@ function locateComponent(
   const dx = Math.min(cx, width - 1 - cx);
   const dy = Math.min(cy, height - 1 - cy);
   const shortSide = Math.max(1, Math.min(width, height));
+  const strip = dy <= height * STRIP_MARGIN || dx <= width * STRIP_MARGIN;
+  const corner = dx <= width * CORNER_MARGIN && dy <= height * CORNER_MARGIN;
   return {
-    corner: dx <= width * CORNER_MARGIN && dy <= height * CORNER_MARGIN,
-    strip: dy <= height * STRIP_MARGIN,
+    corner,
+    strip,
+    edge: strip || corner,
     cornerDistance: Math.hypot(dx, dy) / shortSide,
   };
 }
@@ -455,6 +461,7 @@ function scanCandidates(image: ImageData, threshold: number): CandidateScan {
 
   const detail = boxBlur(gray, width, height, 2);
   const blur = boxBlur(gray, width, height, 6);
+  const wideBlur = boxBlur(gray, width, height, 14);
   const channelBlur: ChannelField = {
     r: boxBlur(channels.r, width, height, 6),
     g: boxBlur(channels.g, width, height, 6),
@@ -467,10 +474,52 @@ function scanCandidates(image: ImageData, threshold: number): CandidateScan {
       if (!inSearchZone(x, y, width, height)) continue;
       const i = y * width + x;
       const absDiff = Math.abs(gray[i] - blur[i]);
-      // Overlays are painted on: they stand out from the local background and wash out its colour.
-      const overlayLike = absDiff >= 16 && absDiff <= 150 && sat[i] <= 0.45 && chroma[i] <= 42;
+      const wideDiff = Math.abs(gray[i] - wideBlur[i]);
+      const nearWhite = gray[i] >= 200 && chroma[i] <= 32;
+      const nearBlack = gray[i] <= 50 && chroma[i] <= 32;
+      const whiteOutlier = nearWhite && gray[i] >= wideBlur[i] + 14;
+      const blackOutlier = nearBlack && gray[i] <= wideBlur[i] - 14;
+      // Local contrast catches marks on busy backgrounds; the wider blur also catches
+      // white/black ink sitting on similarly bright or dark patches (e.g. flowers, sky).
+      const overlayLike =
+        (absDiff >= 12 && absDiff <= 160 && sat[i] <= 0.5 && chroma[i] <= 48) ||
+        (wideDiff >= 12 && absDiff <= 160 && sat[i] <= 0.45 && chroma[i] <= 40 && (whiteOutlier || blackOutlier || absDiff >= 8)) ||
+        (whiteOutlier && wideDiff >= 8) ||
+        (blackOutlier && wideDiff >= 8);
       if (overlayLike) {
         candidate[i] = 1;
+      }
+    }
+  }
+
+  // Corner highlight pass: bright/dark ink on near-matching backgrounds (white on sky).
+  const cornerW = Math.max(8, Math.round(width * CORNER_MARGIN));
+  const cornerH = Math.max(8, Math.round(height * CORNER_MARGIN));
+  const corners = [
+    { x0: 0, y0: 0, x1: cornerW, y1: cornerH },
+    { x0: width - cornerW, y0: 0, x1: width, y1: cornerH },
+    { x0: 0, y0: height - cornerH, x1: cornerW, y1: height },
+    { x0: width - cornerW, y0: height - cornerH, x1: width, y1: height },
+  ];
+  for (const box of corners) {
+    const samples: number[] = [];
+    for (let y = box.y0; y < box.y1; y += 1) {
+      for (let x = box.x0; x < box.x1; x += 1) {
+        const i = y * width + x;
+        if (chroma[i] <= 40) samples.push(gray[i]);
+      }
+    }
+    if (samples.length < 20) continue;
+    samples.sort((a, b) => a - b);
+    const p90 = samples[Math.floor(samples.length * 0.9)];
+    const p10 = samples[Math.floor(samples.length * 0.1)];
+    const median = samples[Math.floor(samples.length * 0.5)];
+    for (let y = box.y0; y < box.y1; y += 1) {
+      for (let x = box.x0; x < box.x1; x += 1) {
+        const i = y * width + x;
+        if (chroma[i] > 34) continue;
+        if (gray[i] >= Math.max(p90, median + 18) && gray[i] >= 185) candidate[i] = 1;
+        if (gray[i] <= Math.min(p10, median - 18) && gray[i] <= 70) candidate[i] = 1;
       }
     }
   }
@@ -485,10 +534,10 @@ function scanCandidates(image: ImageData, threshold: number): CandidateScan {
     const bw = component.maxX - component.minX + 1;
     const bh = component.maxY - component.minY + 1;
     const zone = locateComponent(component.minX, component.minY, component.maxX, component.maxY, width, height);
-    const minSize = zone.strip ? 8 : 12;
-    if (size < minSize || frac > 0.02) continue;
+    const minSize = zone.edge ? 6 : 12;
+    if (size < minSize || frac > 0.025) continue;
 
-    if ((bw * bh) / total > 0.06 || bh > height * 0.18 || bw > width * 0.45) continue;
+    if ((bw * bh) / total > 0.08 || bh > height * 0.22 || bw > width * 0.55) continue;
 
     const stats = componentStats(
       component,
@@ -503,45 +552,82 @@ function scanCandidates(image: ImageData, threshold: number): CandidateScan {
     );
     const aspect = bw / Math.max(1, bh);
 
-    // Overlays are crisp, compact, near-neutral marks printed in one flat tone.
-    if (stats.strokeWidth > 6) continue;
-    if (stats.avgChroma > 24) continue;
-    if (stats.polarity < 0.85) continue;
-    if (stats.avgContrast < 18) continue;
-    if (stats.crispness < 0.34) continue;
-    if (stats.toneDeviation > 34) continue;
-    if (stats.fill < 0.15) continue;
+    // Solid logo blocks are thick (high strokeWidth) but still valid when fill is high.
+    if (stats.fill >= 0.5) {
+      if (stats.strokeWidth > 18) continue;
+    } else if (stats.strokeWidth > 7) {
+      continue;
+    }
+    if (stats.avgChroma > 30) continue;
+    if (stats.polarity < 0.8) continue;
+    if (stats.avgContrast < 10 && stats.inkNeutrality < 0.3 && stats.avgTone < 190) continue;
+    if (stats.crispness < 0.26) continue;
+    if (stats.toneDeviation > 42) continue;
+    if (stats.fill < 0.12) continue;
     // Classic watermarks are white or black ink — reject pastel photo detail.
-    if (stats.inkNeutrality < 0.25 && stats.flatness > 18) continue;
-    if (!zone.corner && !(zone.strip && aspect >= 2.2)) continue;
-    // Stay close to the image border; mid-frame "corner margin" hits are usually sky/road texture.
-    if (zone.cornerDistance > 0.18 && !(zone.strip && aspect >= 2.5)) continue;
+    if (stats.inkNeutrality < 0.18 && stats.flatness > 22) continue;
+    // Bright haze lines (thin sky streaks) are not watermarks.
+    if (stats.avgTone >= 185) {
+      if (!zone.edge) continue;
+      // Thin bright ribbons far from a corner are almost always sky/cloud detail.
+      if (!zone.corner && Math.min(bw, bh) <= 6 && zone.cornerDistance > 0.16) continue;
+      if (stats.avgContrast < 8 && zone.cornerDistance > 0.14) continue;
+      if (Math.min(bw, bh) < 4) continue;
+      if (size < 12) continue;
+      if (bh <= 3 && aspect >= 3) continue;
+    }
 
-    let score = 0.18;
+    // Dark photo texture (soil, leaves, shadows) often looks like black ink. Demand a sharper glyph.
+    if (stats.avgTone < 90) {
+      if (stats.crispness < 0.52) continue;
+      if (stats.avgContrast < 22) continue;
+      if (stats.strokeWidth > 4.2) continue;
+      if (stats.flatness > 16 && aspect < 1.6) continue;
+    }
+
+    if (!zone.edge) continue;
+    // Compact corner logos can sit a little further in; long text stays on the strip.
+    if (zone.cornerDistance > 0.28 && !(zone.strip && aspect >= 1.8)) continue;
+
+    let score = 0.16;
     if (zone.corner) score += 0.14;
-    if (zone.cornerDistance <= 0.06) score += 0.14;
-    else if (zone.cornerDistance <= 0.1) score += 0.07;
-    if (zone.strip && aspect >= 2.2) score += 0.1;
-    if (stats.inkNeutrality >= 0.5) score += 0.18;
-    else if (stats.inkNeutrality >= 0.28) score += 0.1;
-    if (stats.avgChroma <= 10) score += 0.08;
-    else if (stats.avgChroma <= 16) score += 0.04;
-    if (stats.crispness >= 0.75) score += 0.1;
-    else if (stats.crispness >= 0.55) score += 0.05;
-    if (stats.flatness <= 10) score += 0.1;
-    else if (stats.flatness <= 16) score += 0.05;
-    if (stats.avgContrast >= 36) score += 0.08;
-    else if (stats.avgContrast >= 26) score += 0.04;
-    if (frac <= 0.004) score += 0.04;
-    if (stats.fill >= 0.35) score += 0.04;
-    score = Math.min(0.98, score);
+    if (zone.edge) score += 0.06;
+    if (zone.cornerDistance <= 0.06) score += 0.1;
+    else if (zone.cornerDistance <= 0.12) score += 0.05;
+    if (zone.strip && aspect >= 1.8) score += 0.1;
+    // Prefer classic white watermarks; dark marks need stronger glyph evidence.
+    if (stats.avgTone >= 190 && stats.inkNeutrality >= 0.35) score += 0.2;
+    else if (stats.inkNeutrality >= 0.45) score += 0.12;
+    else if (stats.inkNeutrality >= 0.22) score += 0.06;
+    if (stats.avgChroma <= 12) score += 0.08;
+    else if (stats.avgChroma <= 18) score += 0.04;
+    if (stats.crispness >= 0.65) score += 0.08;
+    else if (stats.crispness >= 0.45) score += 0.04;
+    if (stats.flatness <= 12) score += 0.08;
+    else if (stats.flatness <= 18) score += 0.04;
+    if (stats.avgContrast >= 28) score += 0.08;
+    else if (stats.avgContrast >= 18) score += 0.04;
+    if (frac <= 0.006) score += 0.04;
+    if (stats.fill >= 0.3) score += 0.04;
+    if (stats.avgTone < 90) score -= 0.06;
+    score = Math.min(0.98, Math.max(0, score));
 
     const entry = { component, score, stats, zone };
     eligible.push(entry);
     if (score >= threshold) scored.push(entry);
   }
 
-  scored.sort((a, b) => b.score - a.score);
+  scored.sort((a, b) => {
+    const brightRank = (item: ScoredCandidate): number => {
+      if (item.stats.avgTone < 185 || item.stats.inkNeutrality < 0.28) return 0;
+      if (item.zone.corner) return 2;
+      if (item.zone.strip && item.stats.fill >= 0.4) return 1;
+      return 0;
+    };
+    const rankDiff = brightRank(b) - brightRank(a);
+    if (rankDiff !== 0) return rankDiff;
+    return b.score - a.score;
+  });
   eligible.sort((a, b) => b.score - a.score);
   return { width, height, total, scored, eligible, candidate, gray };
 }
@@ -571,6 +657,7 @@ export function debugOverlayCandidates(
     cornerDist: Number(zone.cornerDistance.toFixed(3)),
     corner: zone.corner,
     strip: zone.strip,
+    edge: zone.edge,
   }));
 }
 
@@ -584,9 +671,23 @@ export function detectUnwantedOverlay(
   }
 
   const best = scored[0];
-  // Busy textures produce many look-alike candidates; only act when one clearly stands out.
-  if (scored.length > TEXTURE_CANDIDATE_LIMIT && best.score < 0.85) {
-    return { detected: false, confidence: best.score, mask: null, reason: "low-confidence" };
+  // Busy textures spawn many look-alike candidates. White ink marks still win clearly;
+  // dark lookalikes in foliage do not.
+  if (scored.length > TEXTURE_CANDIDATE_LIMIT) {
+    const runnerUp = scored[1]?.score ?? 0;
+    const brightInk = best.stats.avgTone >= 185 && best.stats.inkNeutrality >= 0.28 && best.zone.corner;
+    const clearWinner = best.score - runnerUp >= 0.08;
+    if (brightInk && best.score >= 0.68) {
+      // keep going — classic white watermark
+    } else if (!(clearWinner && best.score >= 0.8)) {
+      return { detected: false, confidence: best.score, mask: null, reason: "low-confidence" };
+    }
+  }
+  if (scored.length >= 6 && best.stats.avgTone < 90) {
+    const nearBest = scored.filter((item) => best.score - item.score <= 0.15).length;
+    if (nearBest >= 4) {
+      return { detected: false, confidence: best.score, mask: null, reason: "low-confidence" };
+    }
   }
 
   const clusterPool =
