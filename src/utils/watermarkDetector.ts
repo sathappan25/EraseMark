@@ -1,6 +1,10 @@
 import { findSparkleMark } from "./sparkleMark";
 
-export const AUTO_RESTORE_CONFIDENCE_THRESHOLD = 0.58;
+/**
+ * Generic scoring only acts when it is very sure. Cleaning the wrong spot is worse than leaving a
+ * mark, so anything less certain is handed to the user for manual selection.
+ */
+export const AUTO_RESTORE_CONFIDENCE_THRESHOLD = 0.82;
 
 export type OverlayDetectionReason = "low-confidence" | "too-large" | "empty";
 

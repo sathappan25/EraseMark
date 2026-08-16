@@ -1,4 +1,5 @@
 export { detectUnwantedOverlay } from "../src/utils/watermarkDetector";
+export { findSparkleMark, debugSparkleAt, debugSparkleHits } from "../src/utils/sparkleMark";
 export { nearestNeighborFill } from "../src/utils/nearestNeighborFill";
 export { exemplarFill } from "../src/utils/exemplarFill";
 export { hybridFill } from "../src/utils/hybridFill";
