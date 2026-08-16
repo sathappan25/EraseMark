@@ -1,3 +1,5 @@
+import { findSparkleMark } from "./sparkleMark";
+
 export const AUTO_RESTORE_CONFIDENCE_THRESHOLD = 0.58;
 
 export type OverlayDetectionReason = "low-confidence" | "too-large" | "empty";
@@ -14,6 +16,7 @@ const MAX_MASK_COVERAGE = 0.06;
 const MIN_MASK_PIXELS = 24;
 const FULL_DILATE_RADIUS = 3;
 const TEXTURE_CANDIDATE_LIMIT = 12;
+const MASK_ON = 16;
 
 function luminance(r: number, g: number, b: number): number {
   return 0.299 * r + 0.587 * g + 0.114 * b;
@@ -413,6 +416,15 @@ function binaryToMaskImage(mask: Uint8Array, width: number, height: number): Ima
   return image;
 }
 
+function dilateMaskImage(mask: ImageData, radius: number): ImageData {
+  const binary = new Uint8Array(mask.width * mask.height);
+  for (let i = 0; i < binary.length; i += 1) {
+    binary[i] = mask.data[i * 4] > MASK_ON ? 1 : 0;
+  }
+  const grown = dilateRadius(binary, mask.width, mask.height, radius);
+  return binaryToMaskImage(grown, mask.width, mask.height);
+}
+
 interface ScoredCandidate {
   component: Component;
   score: number;
@@ -665,6 +677,14 @@ export function detectUnwantedOverlay(
   image: ImageData,
   threshold = AUTO_RESTORE_CONFIDENCE_THRESHOLD,
 ): OverlayDetectionResult {
+  // Stamped corner sparkles (Gemini and similar AI marks) are matched by shape first: it is the
+  // most common case and template matching is far more reliable than generic scoring.
+  const sparkle = findSparkleMark(image);
+  if (sparkle) {
+    const dilated = dilateMaskImage(sparkle.mask, FULL_DILATE_RADIUS);
+    return { detected: true, confidence: sparkle.confidence, mask: dilated };
+  }
+
   const { width, height, total, scored, eligible, candidate, gray } = scanCandidates(image, threshold);
   if (scored.length === 0) {
     return { detected: false, confidence: 0, mask: null, reason: "empty" };

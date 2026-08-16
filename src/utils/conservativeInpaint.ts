@@ -1,6 +1,6 @@
 import type { InpaintAlgorithm } from "../types";
 import { createCanvas, getContext2d } from "./canvas";
-import { exemplarFill } from "./exemplarFill";
+import { hybridFill } from "./hybridFill";
 import { nearestNeighborFill } from "./nearestNeighborFill";
 import { restoreImageLocal, tryRestoreWithOpenCv } from "./inpaint";
 import {
@@ -70,6 +70,7 @@ function fillCropWithTexture(
   imageCrop: HTMLCanvasElement,
   maskCrop: HTMLCanvasElement,
   maskPixels: number,
+  radius: number,
 ): { canvas: HTMLCanvasElement; engine: "nearest" | "exemplar" } {
   const imageCtx = getContext2d(imageCrop) as CanvasRenderingContext2D;
   const maskCtx = getContext2d(maskCrop) as CanvasRenderingContext2D;
@@ -82,7 +83,7 @@ function fillCropWithTexture(
 
   const engine = maskPixels <= NEAREST_MAX_MASK_PIXELS ? "nearest" : "exemplar";
   const filled =
-    engine === "nearest" ? nearestNeighborFill(source, maskGray) : exemplarFill(source, maskGray);
+    engine === "nearest" ? nearestNeighborFill(source, maskGray) : hybridFill(source, maskGray, radius);
   const output = createCanvas(imageCrop.width, imageCrop.height);
   (getContext2d(output) as CanvasRenderingContext2D).putImageData(filled, 0, 0);
   return { canvas: output, engine };
@@ -129,10 +130,10 @@ export function restoreConservatively(
   let inpaintedCrop: HTMLCanvasElement | null = null;
 
   if (analysis.pixels <= EXEMPLAR_MAX_MASK_PIXELS) {
-    const filled = fillCropWithTexture(imageCrop, maskCrop, analysis.pixels);
+    const filled = fillCropWithTexture(imageCrop, maskCrop, analysis.pixels, safeRadius);
     inpaintedCrop = filled.canvas;
     engine = filled.engine;
-    log(engine === "nearest" ? "Filling from nearest pixels" : "Filling with matched texture patches");
+    log(engine === "nearest" ? "Filling from nearest pixels" : "Filling with texture and blend mix");
   } else {
     inpaintedCrop = tryRestoreWithOpenCv(imageCrop, maskCrop, safeRadius, algorithm);
     engine = inpaintedCrop ? "opencv" : "fallback";

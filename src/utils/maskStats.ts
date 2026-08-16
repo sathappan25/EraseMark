@@ -4,6 +4,55 @@ export const MAX_AUTO_BBOX_PERCENT = 25;
 /** Padding around the mask; gives the filler nearby intact pixels to copy from. */
 export const CROP_PADDING = 16;
 export const INNER_FEATHER_PX = 0;
+/** Width of the band around the mark used to judge whether the surroundings are smooth. */
+export const SPREAD_BAND_PX = 6;
+
+/**
+ * Luminance spread of the intact band hugging the mask. Low values mean the mark sits on a smooth
+ * area such as sky, where blending looks better than copying texture patches.
+ */
+export function surroundingSpread(
+  source: ImageData,
+  maskGray: Uint8Array,
+  bandWidth = SPREAD_BAND_PX,
+): number {
+  const width = source.width;
+  const height = source.height;
+  const inside = new Uint8Array(width * height);
+  for (let i = 0; i < inside.length; i += 1) inside[i] = maskGray[i] > MASK_THRESHOLD ? 1 : 0;
+
+  let band = inside;
+  for (let pass = 0; pass < bandWidth; pass += 1) {
+    const grown = new Uint8Array(band);
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const i = y * width + x;
+        if (band[i]) continue;
+        const up = y > 0 && band[i - width];
+        const down = y + 1 < height && band[i + width];
+        const left = x > 0 && band[i - 1];
+        const right = x + 1 < width && band[i + 1];
+        if (up || down || left || right) grown[i] = 1;
+      }
+    }
+    band = grown;
+  }
+
+  let sum = 0;
+  let sumSquares = 0;
+  let count = 0;
+  for (let i = 0; i < band.length; i += 1) {
+    if (!band[i] || inside[i]) continue;
+    const p = i * 4;
+    const luma = 0.299 * source.data[p] + 0.587 * source.data[p + 1] + 0.114 * source.data[p + 2];
+    sum += luma;
+    sumSquares += luma * luma;
+    count += 1;
+  }
+  if (count < 16) return Number.POSITIVE_INFINITY;
+  const mean = sum / count;
+  return Math.sqrt(Math.max(0, sumSquares / count - mean * mean));
+}
 
 export interface MaskBounds {
   x: number;

@@ -3,6 +3,8 @@ import { nearestNeighborFill } from "./nearestNeighborFill";
 const PATCH_RADIUS = 2;
 const SEARCH_RADIUS = 22;
 const MASK_ON = 16;
+/** Pixels this close to the mark are skipped as sources: they often carry the mark's soft fringe. */
+const SOURCE_MARGIN = 2;
 /** Hard cap so a large or awkward mask can never stall the processing pipeline. */
 const TIME_BUDGET_MS = 1200;
 
@@ -57,6 +59,30 @@ export function exemplarFill(
     }
   }
 
+  // Only untouched pixels a little away from the mark may be copied, so the mark's own soft fringe
+  // and already filled pixels cannot seed the result.
+  const eligible = new Uint8Array(width * height);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const i = y * width + x;
+      if (!known[i]) continue;
+      let nearMark = false;
+      for (let dy = -SOURCE_MARGIN; dy <= SOURCE_MARGIN && !nearMark; dy += 1) {
+        const ny = y + dy;
+        if (ny < 0 || ny >= height) continue;
+        for (let dx = -SOURCE_MARGIN; dx <= SOURCE_MARGIN; dx += 1) {
+          const nx = x + dx;
+          if (nx < 0 || nx >= width) continue;
+          if (!known[ny * width + nx]) {
+            nearMark = true;
+            break;
+          }
+        }
+      }
+      eligible[i] = nearMark ? 0 : 1;
+    }
+  }
+
   const patchCost = (
     targetX: number,
     targetY: number,
@@ -75,7 +101,7 @@ export function exemplarFill(
         const sx = sourceX + dx;
         if (tx < 0 || tx >= width || sx < 0 || sx >= width) return Number.POSITIVE_INFINITY;
         const si = sy * width + sx;
-        if (!known[si]) return Number.POSITIVE_INFINITY;
+        if (!eligible[si]) return Number.POSITIVE_INFINITY;
         const ti = ty * width + tx;
         if (!known[ti]) continue;
         overlap += 1;
